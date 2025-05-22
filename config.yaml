@@ -1,0 +1,14 @@
+model:
+  id: "stabilityai/animate-diffusion"
+  revision: "fp16"
+
+generation:
+  num_frames: 16
+  height: 360
+  width: 640
+  guidance_scale: 7.5
+  num_inference_steps: 30
+
+output:
+  path: "output.mp4"
+  fps: 8
