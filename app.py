@@ -1,7 +1,13 @@
 """
-Minimal Text-to-Video Telegram Bot (CPU-only)
-Uses diffusers v0.12.1 to avoid accelerate_utils import errors.
+app.py — Minimal Text-to-Video Telegram Bot (CPU-only)
+Includes monkey-patch for huggingface_hub.cached_download to satisfy diffusers.
 """
+# Monkey-patch huggingface_hub so diffusers can find cached_download
+import huggingface_hub
+if not hasattr(huggingface_hub, "cached_download"):
+    from huggingface_hub import hf_hub_download
+    huggingface_hub.cached_download = hf_hub_download
+
 import yaml
 import time
 import logging
@@ -36,7 +42,7 @@ def retry(exceptions, tries=3, delay=2):
         return wrapper
     return deco
 
-# Load configuration
+# Load configuration from config.yaml
 @retry(Exception)
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
@@ -46,7 +52,7 @@ def load_config(path="config.yaml"):
 @retry(Exception)
 def load_pipeline(model_id, revision=None, torch_dtype=torch.float32):
     device = "cpu"
-    logging.info(f"Loading model {model_id} on {device}")
+    logging.info(f"Loading model '{model_id}' on {device}")
     pipe = DiffusionPipeline.from_pretrained(
         model_id,
         revision=revision,
@@ -57,7 +63,7 @@ def load_pipeline(model_id, revision=None, torch_dtype=torch.float32):
     pipe.enable_attention_slicing()
     return pipe
 
-# Generate video frames
+# Generate video frames from text prompt
 @retry(Exception)
 def generate_frames(pipe, prompt, num_frames, height, width, guidance_scale, num_inference_steps):
     logging.info(f"Generating {num_frames} frames for prompt: {prompt}")
@@ -71,21 +77,18 @@ def generate_frames(pipe, prompt, num_frames, height, width, guidance_scale, num
     )
     return [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in output.frames]
 
-# Save video to file
+# Save frames as MP4 video
 def save_video(frames, out_path, fps):
     logging.info(f"Saving video to {out_path}")
     clip = ImageSequenceClip(frames, fps=fps)
     clip.write_videofile(out_path, codec="libx264", verbose=False, logger=None)
     return out_path
 
-# Telegram Bot Class
+# Telegram Bot
 class TextToVideoBot:
     def __init__(self, token, cfg):
         self.cfg = cfg
-        self.pipe = load_pipeline(
-            cfg["model"]["id"],
-            cfg["model"].get("revision")
-        )
+        self.pipe = load_pipeline(cfg["model"]["id"], cfg["model"].get("revision"))
         self.bot = Bot(token)
         self.updater = Updater(self.bot, use_context=True)
         dp = self.updater.dispatcher
@@ -96,38 +99,28 @@ class TextToVideoBot:
         keyboard = [["Generate Video", "Help"]]
         markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         update.message.reply_text(
-            "Welcome! Click 'Generate Video' then send a prompt, or 'Help' for instructions.",
+            "Welcome! Click 'Generate Video' then send your prompt, or 'Help' for instructions.",
             reply_markup=markup
         )
 
     def on_text(self, update: Update, context: CallbackContext):
-        text = update.message.text
+        text = update.message.text.strip()
         if text.lower() == "help":
             update.message.reply_text(
-                "Send any text prompt and I will generate a short video (360p).",
+                "Send any descriptive text and I'll reply with a short (360p) video.",
                 reply_markup=ReplyKeyboardRemove()
             )
             return
 
-        update.message.reply_text(
-            "Generating video… Please wait.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        update.message.reply_text("Generating video… please wait.", reply_markup=ReplyKeyboardRemove())
         try:
-            frames = generate_frames(
-                self.pipe,
-                text,
-                **self.cfg["generation"]
-            )
-            path = save_video(
-                frames,
-                self.cfg["output"]["path"],
-                self.cfg["output"]["fps"]
-            )
-            update.message.reply_video(open(path, "rb"))
+            frames = generate_frames(self.pipe, text, **self.cfg["generation"])
+            path = save_video(frames, self.cfg["output"]["path"], self.cfg["output"]["fps"])
+            with open(path, "rb") as vid:
+                update.message.reply_video(vid)
         except Exception as e:
             logging.error(f"Generation error: {e}")
-            update.message.reply_text(f"Generation failed: {e}")
+            update.message.reply_text(f"Video generation failed: {e}")
 
     def run(self):
         logging.info("Bot polling started")
@@ -135,6 +128,6 @@ class TextToVideoBot:
         self.updater.idle()
 
 if __name__ == "__main__":
-    cfg = load_config("config.yaml")
-    token = "5161663037:AAEW27Jyg3aeV2ZCttUET2EIQaDUQIFS9Ds"
-    TextToVideoBot(token, cfg).run()
+    config = load_config("config.yaml")
+    TELEGRAM_TOKEN = "5161663037:AAEW27Jyg3aeV2ZCttUET2EIQaDUQIFS9Ds"
+    TextToVideoBot(TELEGRAM_TOKEN, config).run()
