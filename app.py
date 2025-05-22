@@ -1,12 +1,23 @@
 """
 app.py — Minimal Text-to-Video Telegram Bot (CPU-only)
-Includes monkey-patch for huggingface_hub.cached_download to satisfy diffusers.
+Includes monkey-patches for:
+  • huggingface_hub.cached_download
+  • jax.random.KeyArray
+to satisfy diffusers v0.12.1 on Colab.
 """
-# Monkey-patch huggingface_hub so diffusers can find cached_download
+
+# 1) Patch huggingface_hub so diffusers can use cached_download
 import huggingface_hub
 if not hasattr(huggingface_hub, "cached_download"):
     from huggingface_hub import hf_hub_download
     huggingface_hub.cached_download = hf_hub_download
+
+# 2) Patch JAX so FlaxModelMixin sees KeyArray
+try:
+    import jax
+    jax.random.KeyArray = jax.random.PRNGKey
+except ImportError:
+    pass
 
 import yaml
 import time
@@ -37,7 +48,6 @@ def retry(exceptions, tries=3, delay=2):
                 except exceptions as e:
                     logging.warning(f"Attempt {attempt} failed: {e}")
                     time.sleep(delay)
-            # Last attempt
             return func(*args, **kwargs)
         return wrapper
     return deco
