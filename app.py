@@ -1,18 +1,23 @@
 """
-app.py — Minimal Text-to-Video Telegram Bot (CPU-only)
-Includes monkey-patches for:
-  • huggingface_hub.cached_download
-  • jax.random.KeyArray
-to satisfy diffusers v0.12.1 on Colab.
+app.py — Text-to-Video Telegram Bot (GPU/CPU)
+Includes monkey-patches for huggingface_hub.cached_download and jax.random.KeyArray.
+Uses HF token for gated models.
 """
 
-# 1) Patch huggingface_hub so diffusers can use cached_download
+import os
+
+# Hugging Face token for private or gated models
+os.environ["HUGGINGFACE_HUB_TOKEN"] = "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"
+# for backwards compatibility
+os.environ["HUGGINGFACEHUB_API_TOKEN"] = os.environ["HUGGINGFACE_HUB_TOKEN"]
+
+# Monkey-patch huggingface_hub
 import huggingface_hub
 if not hasattr(huggingface_hub, "cached_download"):
     from huggingface_hub import hf_hub_download
     huggingface_hub.cached_download = hf_hub_download
 
-# 2) Patch JAX so FlaxModelMixin sees KeyArray
+# Monkey-patch JAX for Flax compatibility
 try:
     import jax
     jax.random.KeyArray = jax.random.PRNGKey
@@ -52,29 +57,32 @@ def retry(exceptions, tries=3, delay=2):
         return wrapper
     return deco
 
-# Load configuration from config.yaml
-@retry(Exception)
+# Load configuration
+# @retry(Exception)
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-# Load Diffusers pipeline on CPU
-@retry(Exception)
-def load_pipeline(model_id, revision=None, torch_dtype=torch.float32):
-    device = "cpu"
+# Load Diffusers pipeline on GPU/CPU
+# @retry(Exception)
+def load_pipeline(model_id, revision=None, torch_dtype=torch.float16):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     logging.info(f"Loading model '{model_id}' on {device}")
     pipe = DiffusionPipeline.from_pretrained(
         model_id,
         revision=revision,
         torch_dtype=torch_dtype,
         safety_checker=None,
-        device_map=device
+        device_map="auto",
+        use_auth_token=True
     )
+    # If device_map auto didn't put on GPU, move it
+    pipe.to(device)
     pipe.enable_attention_slicing()
     return pipe
 
-# Generate video frames from text prompt
-@retry(Exception)
+# Generate video frames
+# @retry(Exception)
 def generate_frames(pipe, prompt, num_frames, height, width, guidance_scale, num_inference_steps):
     logging.info(f"Generating {num_frames} frames for prompt: {prompt}")
     output = pipe(
@@ -87,18 +95,21 @@ def generate_frames(pipe, prompt, num_frames, height, width, guidance_scale, num
     )
     return [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in output.frames]
 
-# Save frames as MP4 video
+# Save frames as video
 def save_video(frames, out_path, fps):
     logging.info(f"Saving video to {out_path}")
     clip = ImageSequenceClip(frames, fps=fps)
     clip.write_videofile(out_path, codec="libx264", verbose=False, logger=None)
     return out_path
 
-# Telegram Bot
+# Telegram Bot class
 class TextToVideoBot:
     def __init__(self, token, cfg):
         self.cfg = cfg
-        self.pipe = load_pipeline(cfg["model"]["id"], cfg["model"].get("revision"))
+        self.pipe = load_pipeline(
+            cfg["model"]["id"],
+            cfg["model"].get("revision")
+        )
         self.bot = Bot(token)
         self.updater = Updater(self.bot, use_context=True)
         dp = self.updater.dispatcher
@@ -109,7 +120,7 @@ class TextToVideoBot:
         keyboard = [["Generate Video", "Help"]]
         markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         update.message.reply_text(
-            "Welcome! Click 'Generate Video' then send your prompt, or 'Help' for instructions.",
+            "Welcome! Click 'Generate Video' then send a prompt, or 'Help'.",
             reply_markup=markup
         )
 
@@ -117,12 +128,15 @@ class TextToVideoBot:
         text = update.message.text.strip()
         if text.lower() == "help":
             update.message.reply_text(
-                "Send any descriptive text and I'll reply with a short (360p) video.",
+                "Send text and I'll return a short video.",
                 reply_markup=ReplyKeyboardRemove()
             )
             return
 
-        update.message.reply_text("Generating video… please wait.", reply_markup=ReplyKeyboardRemove())
+        update.message.reply_text(
+            "Generating video… please wait.",
+            reply_markup=ReplyKeyboardRemove()
+        )
         try:
             frames = generate_frames(self.pipe, text, **self.cfg["generation"])
             path = save_video(frames, self.cfg["output"]["path"], self.cfg["output"]["fps"])
@@ -130,7 +144,7 @@ class TextToVideoBot:
                 update.message.reply_video(vid)
         except Exception as e:
             logging.error(f"Generation error: {e}")
-            update.message.reply_text(f"Video generation failed: {e}")
+            update.message.reply_text(f"Failed: {e}")
 
     def run(self):
         logging.info("Bot polling started")
@@ -138,6 +152,6 @@ class TextToVideoBot:
         self.updater.idle()
 
 if __name__ == "__main__":
-    config = load_config("config.yaml")
+    cfg = load_config("config.yaml")
     TELEGRAM_TOKEN = "5161663037:AAEW27Jyg3aeV2ZCttUET2EIQaDUQIFS9Ds"
-    TextToVideoBot(TELEGRAM_TOKEN, config).run()
+    TextToVideoBot(TELEGRAM_TOKEN, cfg).run()
